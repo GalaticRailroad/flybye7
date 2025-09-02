@@ -28,10 +28,10 @@ namespace Galaxy
         public void OnCreate(ref SystemState state)
         {
             _spatialDatabasesQuery = SystemAPI.QueryBuilder()
-                .WithAll<SpatialDatabase, SpatialDatabaseCell, SpatialDatabaseElement>().Build();
+                .WithAll<OctreeSpatialDatabase, OctreeNode, SpatialObject>().Build();
             state.RequireForUpdate<Config>();
             state.RequireForUpdate<SpatialDatabaseSingleton>();
-            state.RequireForUpdate(_spatialDatabasesQuery);
+            // Don't require spatial database query - check manually in OnUpdate
             state.RequireForUpdate<PlanetNavigationGrid>();
             state.RequireForUpdate<TeamManagerReference>();
             state.RequireForUpdate<BeginSimulationEntityCommandBufferSystem.Singleton>();
@@ -44,6 +44,18 @@ namespace Galaxy
         {
             Config config = SystemAPI.GetSingleton<Config>();
             SpatialDatabaseSingleton spatialDatabaseSingleton = SystemAPI.GetSingleton<SpatialDatabaseSingleton>();
+            
+            // Check if spatial database exists and determine type
+            Entity spatialDbEntity = spatialDatabaseSingleton.TargetablesSpatialDatabase;
+            bool isOctree = spatialDbEntity != Entity.Null && state.EntityManager.HasComponent<OctreeSpatialDatabase>(spatialDbEntity);
+            bool isUniformGrid = spatialDbEntity != Entity.Null && state.EntityManager.HasComponent<SpatialDatabase>(spatialDbEntity);
+            
+            if (!isOctree && !isUniformGrid)
+            {
+                // Skip spatial queries this frame - no valid spatial database
+                return;
+            }
+            
             VFXHitSparksSingleton vfxSparksSingleton = SystemAPI.GetSingletonRW<VFXHitSparksSingleton>().ValueRW;
             VFXThrustersSingleton vfxThrustersSingleton = SystemAPI.GetSingletonRW<VFXThrustersSingleton>().ValueRW;
 
@@ -72,12 +84,12 @@ namespace Galaxy
                 DeltaTime = SystemAPI.Time.DeltaTime,
                 FighterActionsLookup = SystemAPI.GetBufferLookup<FighterAction>(true),
                 LocalToWorldLookup = SystemAPI.GetComponentLookup<LocalToWorld>(true),
-                CachedSpatialDatabase = new CachedSpatialDatabaseRO
+                CachedOctreeDatabase = new CachedOctreeSpatialDatabaseRO
                 {
-                    SpatialDatabaseEntity = spatialDatabaseSingleton.TargetablesSpatialDatabase, 
-                    SpatialDatabaseLookup = SystemAPI.GetComponentLookup<SpatialDatabase>(true),
-                    CellsBufferLookup = SystemAPI.GetBufferLookup<SpatialDatabaseCell>(true),
-                    ElementsBufferLookup = SystemAPI.GetBufferLookup<SpatialDatabaseElement>(true),
+                    SpatialDatabaseEntity = spatialDatabaseSingleton.TargetablesSpatialDatabase,
+                    OctreeDatabaseLookup = SystemAPI.GetComponentLookup<OctreeSpatialDatabase>(true),
+                    NodesBufferLookup = SystemAPI.GetBufferLookup<OctreeNode>(true),
+                    ObjectsBufferLookup = SystemAPI.GetBufferLookup<SpatialObject>(true),
                 },
             };
             state.Dependency = fighterAIJob.ScheduleParallel(state.Dependency);
@@ -285,7 +297,7 @@ namespace Galaxy
         public partial struct FighterAIJob : IJobEntity, IJobEntityChunkBeginEnd
         {
             public float DeltaTime;
-            public CachedSpatialDatabaseRO CachedSpatialDatabase;
+            public CachedOctreeSpatialDatabaseRO CachedOctreeDatabase;
             [ReadOnly] public BufferLookup<FighterAction> FighterActionsLookup;
             [ReadOnly] public ComponentLookup<LocalToWorld> LocalToWorldLookup;
 
@@ -358,15 +370,23 @@ namespace Galaxy
                         fighter.DetectionTimer -= DeltaTime;
                         if (fighterData.DetectionRange > 0f && fighter.DetectionTimer <= 0f)
                         {
-                            ShipQueryCollector collector =
-                                new ShipQueryCollector(entity, transform.Position, team.Index);
-                            SpatialDatabase.QueryAABBCellProximityOrder(in CachedSpatialDatabase._SpatialDatabase,
-                                in CachedSpatialDatabase._SpatialDatabaseCells,
-                                in CachedSpatialDatabase._SpatialDatabaseElements, transform.Position,
-                                fighterData.DetectionRange, ref collector);
+                            OctreeShipQueryCollector collector =
+                                new OctreeShipQueryCollector(entity, transform.Position, team.Index);
+                            
+                            float3 queryMin = transform.Position - new float3(fighterData.DetectionRange);
+                            float3 queryMax = transform.Position + new float3(fighterData.DetectionRange);
+                            
+                            DynamicBuffer<OctreeNode> nodesBuffer = CachedOctreeDatabase.NodesBufferLookup[CachedOctreeDatabase.SpatialDatabaseEntity];
+                            DynamicBuffer<SpatialObject> objectsBuffer = CachedOctreeDatabase.ObjectsBufferLookup[CachedOctreeDatabase.SpatialDatabaseEntity];
+                            
+                            OctreeDynamicOperations.QueryAABB(in CachedOctreeDatabase._OctreeDatabase,
+                                nodesBuffer, objectsBuffer, queryMin, queryMax, ref collector);
 
-                            ship.NavigationTargetEntity = collector.ClosestEnemy.Entity;
-                            fighter.TargetIsEnemyShip = 1;
+                            if (collector.ClosestEnemy.Entity != Entity.Null)
+                            {
+                                ship.NavigationTargetEntity = collector.ClosestEnemy.Entity;
+                                fighter.TargetIsEnemyShip = 1;
+                            }
 
                             fighter.DetectionTimer += fighterData.ShipDetectionInterval;
                         }
@@ -437,7 +457,7 @@ namespace Galaxy
             public bool OnChunkBegin(in ArchetypeChunk chunk, int unfilteredChunkIndex, bool useEnabledMask,
                 in v128 chunkEnabledMask)
             {
-                CachedSpatialDatabase.CacheData();
+                CachedOctreeDatabase.CacheData();
                 if (!_tmpFinalImportances.IsCreated)
                 {
                     _tmpFinalImportances = new NativeList<float>(64, Allocator.Temp);

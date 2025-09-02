@@ -54,7 +54,14 @@ namespace Galaxy
         [Header("Acceleration Structures")] 
         public bool BuildSpatialDatabaseParallel = true;
         public float SimulationBoundsPadding;
+        [Tooltip("Legacy uniform grid subdivisions (use for old SpatialDatabase prefabs)")]
         public int SpatialDatabaseSubdivisions = 5;
+        [Tooltip("Maximum octree subdivision depth (recommended: 6-8)")]
+        [Range(1, 10)]
+        public int OctreeMaxDepth = 6;
+        [Tooltip("Objects per octree node before subdivision (recommended: 8-16)")]
+        [Range(1, 50)]
+        public int OctreeMaxObjectsPerNode = 12;
         public int PlanetNavigationGridSubdivisions = 4;
         public int PlanetsNetworkCapacity;
         public int ShipsSpatialDatabaseCellCapacity = 256;
@@ -106,6 +113,8 @@ namespace Galaxy
                     BuildSpatialDatabaseParallel = authoring.BuildSpatialDatabaseParallel,
                     SimulationBoundsPadding = authoring.SimulationBoundsPadding,
                     SpatialDatabaseSubdivisions = authoring.SpatialDatabaseSubdivisions,
+                    OctreeMaxDepth = (byte)authoring.OctreeMaxDepth,
+                    OctreeMaxObjectsPerNode = (byte)authoring.OctreeMaxObjectsPerNode,
                     PlanetNavigationGridSubdivisions = authoring.PlanetNavigationGridSubdivisions,
                     PlanetsNetworkCapacity = authoring.PlanetsNetworkCapacity,
                     ShipsSpatialDatabaseCellCapacity = authoring.ShipsSpatialDatabaseCellCapacity,

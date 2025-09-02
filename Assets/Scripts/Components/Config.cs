@@ -39,7 +39,9 @@ public struct Config : IComponentData
 
     public bool BuildSpatialDatabaseParallel;
     public float SimulationBoundsPadding;
-    public int SpatialDatabaseSubdivisions;
+    public int SpatialDatabaseSubdivisions; // Legacy - for uniform grid compatibility
+    public byte OctreeMaxDepth;
+    public byte OctreeMaxObjectsPerNode;
     public int PlanetNavigationGridSubdivisions;
     public int PlanetsNetworkCapacity;
     public int ShipsSpatialDatabaseCellCapacity;

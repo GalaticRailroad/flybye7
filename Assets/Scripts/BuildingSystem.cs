@@ -55,20 +55,36 @@ public partial struct BuildingSystem : ISystem
         };
         state.Dependency = buildingConstructionJob.Schedule(state.Dependency);
        
-        TurretUpdateAttackJob turretUpdateAttackJob = new TurretUpdateAttackJob
+        // Check if spatial database exists and determine type
+        Entity spatialDbEntity = spatialDatabaseSingleton.TargetablesSpatialDatabase;
+        bool isOctree = spatialDbEntity != Entity.Null && state.EntityManager.HasComponent<OctreeSpatialDatabase>(spatialDbEntity);
+        bool isUniformGrid = spatialDbEntity != Entity.Null && state.EntityManager.HasComponent<SpatialDatabase>(spatialDbEntity);
+        
+        if (isOctree || isUniformGrid)
         {
-            DeltaTime = SystemAPI.Time.DeltaTime,
-            CachedSpatialDatabase = new CachedSpatialDatabaseRO
+            TurretUpdateAttackJob turretUpdateAttackJob = new TurretUpdateAttackJob
             {
-                SpatialDatabaseEntity = spatialDatabaseSingleton.TargetablesSpatialDatabase, 
-                SpatialDatabaseLookup = SystemAPI.GetComponentLookup<SpatialDatabase>(true),
-                CellsBufferLookup = SystemAPI.GetBufferLookup<SpatialDatabaseCell>(true),
-                ElementsBufferLookup = SystemAPI.GetBufferLookup<SpatialDatabaseElement>(true),
-            },
-            LocalToWorldLookup = SystemAPI.GetComponentLookup<LocalToWorld>(true),
-            ParentLookup = SystemAPI.GetComponentLookup<Parent>(true),
-        };
-        state.Dependency = turretUpdateAttackJob.ScheduleParallel(state.Dependency);
+                DeltaTime = SystemAPI.Time.DeltaTime,
+                CachedSpatialDatabase = new CachedSpatialDatabaseRO
+                {
+                    SpatialDatabaseEntity = spatialDatabaseSingleton.TargetablesSpatialDatabase, 
+                    SpatialDatabaseLookup = SystemAPI.GetComponentLookup<SpatialDatabase>(true),
+                    CellsBufferLookup = SystemAPI.GetBufferLookup<SpatialDatabaseCell>(true),
+                    ElementsBufferLookup = SystemAPI.GetBufferLookup<SpatialDatabaseElement>(true),
+                },
+                CachedOctreeDatabase = new CachedOctreeSpatialDatabaseRO
+                {
+                    SpatialDatabaseEntity = spatialDatabaseSingleton.TargetablesSpatialDatabase,
+                    OctreeDatabaseLookup = SystemAPI.GetComponentLookup<OctreeSpatialDatabase>(true),
+                    NodesBufferLookup = SystemAPI.GetBufferLookup<OctreeNode>(true),
+                    ObjectsBufferLookup = SystemAPI.GetBufferLookup<SpatialObject>(true),
+                },
+                IsOctree = isOctree,
+                LocalToWorldLookup = SystemAPI.GetComponentLookup<LocalToWorld>(true),
+                ParentLookup = SystemAPI.GetComponentLookup<Parent>(true),
+            };
+            state.Dependency = turretUpdateAttackJob.ScheduleParallel(state.Dependency);
+        }
        
         TurretExecuteAttack turretExecuteAttack = new TurretExecuteAttack
         {
@@ -201,6 +217,8 @@ public partial struct BuildingSystem : ISystem
     {
         public float DeltaTime;
         public CachedSpatialDatabaseRO CachedSpatialDatabase;
+        public CachedOctreeSpatialDatabaseRO CachedOctreeDatabase;
+        public bool IsOctree;
         [ReadOnly]
         public ComponentLookup<LocalToWorld> LocalToWorldLookup;
         [ReadOnly]
@@ -243,14 +261,34 @@ public partial struct BuildingSystem : ISystem
                 {
                     if (turret.ActiveTarget == Entity.Null)
                     {
-                        ShipQueryCollector collector = new ShipQueryCollector(entity, turretLTW.Position, team.Index);
-                        SpatialDatabase.QueryAABBCellProximityOrder(in CachedSpatialDatabase._SpatialDatabase,
-                            in CachedSpatialDatabase._SpatialDatabaseCells,
-                            in CachedSpatialDatabase._SpatialDatabaseElements, turretLTW.Position,
-                            turretData.AttackRange, ref collector);
+                        if (IsOctree)
+                        {
+                            // Use dynamic octree queries
+                            OctreeShipQueryCollector octreeCollector = new OctreeShipQueryCollector(entity, turretLTW.Position, team.Index);
+                            float3 queryMin = turretLTW.Position - new float3(turretData.AttackRange);
+                            float3 queryMax = turretLTW.Position + new float3(turretData.AttackRange);
+                            
+                            DynamicBuffer<OctreeNode> nodesBuffer = CachedOctreeDatabase.NodesBufferLookup[CachedOctreeDatabase.SpatialDatabaseEntity];
+                            DynamicBuffer<SpatialObject> objectsBuffer = CachedOctreeDatabase.ObjectsBufferLookup[CachedOctreeDatabase.SpatialDatabaseEntity];
+                            
+                            OctreeDynamicOperations.QueryAABB(in CachedOctreeDatabase._OctreeDatabase,
+                                nodesBuffer, objectsBuffer, queryMin, queryMax, ref octreeCollector);
 
-                        turret.ActiveTarget = collector.ClosestEnemy.Entity;
-                        turret.ActiveTargetPosition = collector.ClosestEnemy.Position;
+                            turret.ActiveTarget = octreeCollector.ClosestEnemy.Entity;
+                            turret.ActiveTargetPosition = octreeCollector.ClosestEnemy.Position;
+                        }
+                        else
+                        {
+                            // Use uniform grid queries (backward compatibility)
+                            ShipQueryCollector collector = new ShipQueryCollector(entity, turretLTW.Position, team.Index);
+                            SpatialDatabase.QueryAABBCellProximityOrder(in CachedSpatialDatabase._SpatialDatabase,
+                                in CachedSpatialDatabase._SpatialDatabaseCells,
+                                in CachedSpatialDatabase._SpatialDatabaseElements, turretLTW.Position,
+                                turretData.AttackRange, ref collector);
+
+                            turret.ActiveTarget = collector.ClosestEnemy.Entity;
+                            turret.ActiveTargetPosition = collector.ClosestEnemy.Position;
+                        }
                     }
 
                     turret.DetectionTimer += turretData.ShipDetectionInterval;
@@ -286,7 +324,14 @@ public partial struct BuildingSystem : ISystem
         public bool OnChunkBegin(in ArchetypeChunk chunk, int unfilteredChunkIndex, bool useEnabledMask,
             in v128 chunkEnabledMask)
         {
-            CachedSpatialDatabase.CacheData();
+            if (IsOctree)
+            {
+                CachedOctreeDatabase.CacheData();
+            }
+            else
+            {
+                CachedSpatialDatabase.CacheData();
+            }
             return true;
         }
 
