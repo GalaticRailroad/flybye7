@@ -15,11 +15,11 @@ public partial struct PlanetSystem : ISystem
     [BurstCompile]
     public void OnCreate(ref SystemState state)
     {
-        _spatialDatabasesQuery = SystemAPI.QueryBuilder().WithAll<SpatialDatabase, SpatialDatabaseCell, SpatialDatabaseElement>().Build();
+        _spatialDatabasesQuery = SystemAPI.QueryBuilder().WithAll<OctreeSpatialDatabase, OctreeNode, SpatialObject>().Build();
         
         state.RequireForUpdate<Config>();
         state.RequireForUpdate<SpatialDatabaseSingleton>();
-        state.RequireForUpdate(_spatialDatabasesQuery);
+        // Don't require spatial database query - check manually in OnUpdate
         state.RequireForUpdate<BeginSimulationEntityCommandBufferSystem.Singleton>();
         state.RequireForUpdate<TeamManagerReference>();
     }
@@ -29,18 +29,28 @@ public partial struct PlanetSystem : ISystem
     {
         Config config = SystemAPI.GetSingleton<Config>();
         SpatialDatabaseSingleton spatialDatabaseSingleton = SystemAPI.GetSingleton<SpatialDatabaseSingleton>();
+        
+        // Check if spatial database exists and is ready
+        Entity spatialDbEntity = spatialDatabaseSingleton.TargetablesSpatialDatabase;
+        if (spatialDbEntity == Entity.Null || 
+            !state.EntityManager.HasComponent<OctreeSpatialDatabase>(spatialDbEntity))
+        {
+            // Skip spatial queries this frame - spatial database not ready yet
+            return;
+        }
+        
         EntityQuery planetsQuery = SystemAPI.QueryBuilder().WithAll<Planet>().Build();
         
         PlanetShipsAssessmentJob shipsAssessmentJob = new PlanetShipsAssessmentJob
         {
             TotalPlanetsCount = planetsQuery.CalculateEntityCount(),
             PlanetShipsAssessmentsPerUpdate = config.PlanetShipAssessmentsPerUpdate,
-            CachedSpatialDatabase = new CachedSpatialDatabaseRO
+            CachedOctreeDatabase = new CachedOctreeSpatialDatabaseRO
             {
-                SpatialDatabaseEntity = spatialDatabaseSingleton.TargetablesSpatialDatabase, 
-                SpatialDatabaseLookup = SystemAPI.GetComponentLookup<SpatialDatabase>(true),
-                CellsBufferLookup = SystemAPI.GetBufferLookup<SpatialDatabaseCell>(true),
-                ElementsBufferLookup = SystemAPI.GetBufferLookup<SpatialDatabaseElement>(true),
+                SpatialDatabaseEntity = spatialDatabaseSingleton.TargetablesSpatialDatabase,
+                OctreeDatabaseLookup = SystemAPI.GetComponentLookup<OctreeSpatialDatabase>(true),
+                NodesBufferLookup = SystemAPI.GetBufferLookup<OctreeNode>(true),
+                ObjectsBufferLookup = SystemAPI.GetBufferLookup<SpatialObject>(true),
             },
         };
         state.Dependency = shipsAssessmentJob.Schedule(state.Dependency);
@@ -70,7 +80,7 @@ public partial struct PlanetSystem : ISystem
     {
         public int TotalPlanetsCount;
         public int PlanetShipsAssessmentsPerUpdate;
-        public CachedSpatialDatabaseRO CachedSpatialDatabase;
+        public CachedOctreeSpatialDatabaseRO CachedOctreeDatabase;
 
         void Execute(Entity entity, in LocalTransform transform, ref Planet planet, in Team team,
             ref DynamicBuffer<PlanetShipsAssessment> shipsAssessmentBuffer,
@@ -88,18 +98,22 @@ public partial struct PlanetSystem : ISystem
                     shipsAssessmentBuffer[i] = default;
                 }
 
-                // Query allied and enemy ships count
-                PlanetAssessmentCollector collector = new PlanetAssessmentCollector(team.Index, shipsAssessmentBuffer);
-                SpatialDatabase.QueryAABB(in CachedSpatialDatabase._SpatialDatabase,
-                    in CachedSpatialDatabase._SpatialDatabaseCells, in CachedSpatialDatabase._SpatialDatabaseElements,
-                    transform.Position,
-                    planet.ShipsAssessmentExtents, ref collector);
+                // Query allied and enemy ships count using dynamic octree operations
+                OctreePlanetAssessmentCollector collector = new OctreePlanetAssessmentCollector(team.Index, shipsAssessmentBuffer);
+                float3 queryMin = transform.Position - planet.ShipsAssessmentExtents;
+                float3 queryMax = transform.Position + planet.ShipsAssessmentExtents;
+                
+                DynamicBuffer<OctreeNode> nodesBuffer = CachedOctreeDatabase.NodesBufferLookup[CachedOctreeDatabase.SpatialDatabaseEntity];
+                DynamicBuffer<SpatialObject> objectsBuffer = CachedOctreeDatabase.ObjectsBufferLookup[CachedOctreeDatabase.SpatialDatabaseEntity];
+                
+                OctreeDynamicOperations.QueryAABB(in CachedOctreeDatabase._OctreeDatabase,
+                    nodesBuffer, objectsBuffer, queryMin, queryMax, ref collector);
             }
         }
 
         public bool OnChunkBegin(in ArchetypeChunk chunk, int unfilteredChunkIndex, bool useEnabledMask, in v128 chunkEnabledMask)
         {
-            CachedSpatialDatabase.CacheData();
+            CachedOctreeDatabase.CacheData();
             return true;
         }
 

@@ -299,16 +299,68 @@ namespace Galaxy
             float simulationCubeHalfExtents)
         {
             ref SpatialDatabaseSingleton spatialDatabaseSingleton = ref SystemAPI.GetSingletonRW<SpatialDatabaseSingleton>().ValueRW;
+            
+            // Instantiate the spatial database prefab (could be uniform grid or octree)
             spatialDatabaseSingleton.TargetablesSpatialDatabase =
                 state.EntityManager.Instantiate(config.SpatialDatabasePrefab);
-            SpatialDatabase spatialDatabase =
-                state.EntityManager.GetComponentData<SpatialDatabase>(spatialDatabaseSingleton
-                    .TargetablesSpatialDatabase);
-            DynamicBuffer<SpatialDatabaseCell> cellsBuffer =
-                state.EntityManager.GetBuffer<SpatialDatabaseCell>(spatialDatabaseSingleton.TargetablesSpatialDatabase);
-            DynamicBuffer<SpatialDatabaseElement> elementsBuffer =
-                state.EntityManager.GetBuffer<SpatialDatabaseElement>(spatialDatabaseSingleton
-                    .TargetablesSpatialDatabase);
+            
+            Entity spatialDbEntity = spatialDatabaseSingleton.TargetablesSpatialDatabase;
+            
+            // Check if it's an octree or uniform grid and initialize accordingly
+            if (state.EntityManager.HasComponent<OctreeSpatialDatabase>(spatialDbEntity))
+            {
+                // Initialize octree with config settings and simulation bounds
+                InitializeOctreeDatabase(ref state, spatialDbEntity, config, simulationCubeHalfExtents);
+            }
+            else if (state.EntityManager.HasComponent<SpatialDatabase>(spatialDbEntity))
+            {
+                // Initialize legacy uniform grid (backward compatibility)
+                InitializeUniformGridDatabase(ref state, spatialDbEntity, config, simulationCubeHalfExtents);
+            }
+        }
+        
+        private void InitializeOctreeDatabase(
+            ref SystemState state,
+            Entity octreeEntity,
+            in Config config,
+            float simulationCubeHalfExtents)
+        {
+            // Get the octree component and update it with runtime settings
+            OctreeSpatialDatabase octree = state.EntityManager.GetComponentData<OctreeSpatialDatabase>(octreeEntity);
+            
+            // Override prefab settings with config settings for scene-specific tuning
+            octree.Center = float3.zero;
+            octree.HalfExtent = simulationCubeHalfExtents;
+            octree.MaxDepth = config.OctreeMaxDepth;
+            octree.MaxObjectsPerNode = config.OctreeMaxObjectsPerNode;
+            
+            // Get buffers and initialize with new settings
+            DynamicBuffer<OctreeNode> nodesBuffer = state.EntityManager.GetBuffer<OctreeNode>(octreeEntity);
+            DynamicBuffer<SpatialObject> objectsBuffer = state.EntityManager.GetBuffer<SpatialObject>(octreeEntity);
+            
+            // Reinitialize with updated settings
+            OctreeSpatialDatabase.Initialize(
+                octree.Center,
+                octree.HalfExtent,
+                octree.MaxDepth,
+                octree.MaxObjectsPerNode,
+                ref octree,
+                nodesBuffer,
+                objectsBuffer);
+            
+            state.EntityManager.SetComponentData(octreeEntity, octree);
+        }
+        
+        private void InitializeUniformGridDatabase(
+            ref SystemState state,
+            Entity gridEntity,
+            in Config config,
+            float simulationCubeHalfExtents)
+        {
+            // Legacy uniform grid initialization for backward compatibility
+            SpatialDatabase spatialDatabase = state.EntityManager.GetComponentData<SpatialDatabase>(gridEntity);
+            DynamicBuffer<SpatialDatabaseCell> cellsBuffer = state.EntityManager.GetBuffer<SpatialDatabaseCell>(gridEntity);
+            DynamicBuffer<SpatialDatabaseElement> elementsBuffer = state.EntityManager.GetBuffer<SpatialDatabaseElement>(gridEntity);
 
             SpatialDatabase.Initialize(
                 simulationCubeHalfExtents,
@@ -318,7 +370,7 @@ namespace Galaxy
                 ref cellsBuffer,
                 ref elementsBuffer);
 
-            state.EntityManager.SetComponentData(spatialDatabaseSingleton.TargetablesSpatialDatabase, spatialDatabase);
+            state.EntityManager.SetComponentData(gridEntity, spatialDatabase);
         }
 
         private void CreatePlanetNavigationGrid(
