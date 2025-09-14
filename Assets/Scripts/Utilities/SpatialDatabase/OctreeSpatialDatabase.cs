@@ -6,14 +6,6 @@ using Unity.Collections.LowLevel.Unsafe;
 using Unity.Entities;
 using Unity.Mathematics;
 
-public enum CollisionShapeType : byte
-{
-    Point = 0,
-    AABB = 1,
-    Sphere = 2,
-    // Future: Mesh = 3, Compound = 4
-}
-
 [InternalBufferCapacity(0)]
 public struct OctreeNode : IBufferElementData
 {
